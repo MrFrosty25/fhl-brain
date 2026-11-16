@@ -1,0 +1,10 @@
+{
+  "name": "fhl-brain",
+  "private": true,
+  "type": "module",
+  "description": "The Brain — FHL's one source of truth: the registry of what it holds, and the pure logic to read, draft, publish and revert it.",
+  "scripts": {
+    "test": "node --test tests/*.test.ts",
+    "sync": "node scripts/sync-to-platform.mjs"
+  }
+}
