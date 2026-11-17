@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { REGISTRY, SECTIONS, entryById, entriesIn } from '../src/registry.ts'
+import { REGISTRY, SECTIONS, SOP_NOT_WRITTEN, SOP_SLOTS, entryById, entriesIn, personalDataIn } from '../src/registry.ts'
 
 test('every entry belongs to a declared section, and every section has entries', () => {
   const sections = new Set(SECTIONS.map((s) => s.key))
@@ -11,7 +11,7 @@ test('every entry belongs to a declared section, and every section has entries',
 test('the sections are the owner\'s list, in order', () => {
   assert.deepEqual(SECTIONS.map((s) => s.key), [
     'identity', 'brand', 'pricing', 'money_terms', 'offer', 'promises', 'service_area',
-    'season', 'sales_process', 'ai_rules', 'costs', 'definitions', 'lessons',
+    'season', 'sales_process', 'ai_rules', 'costs', 'definitions', 'sops', 'lessons',
   ])
 })
 
@@ -27,7 +27,7 @@ test('ids are unique and fit the database checks', () => {
 })
 
 test('nothing internal is marked safe for customers', () => {
-  for (const s of ['pricing', 'sales_process', 'ai_rules', 'costs', 'definitions', 'lessons']) {
+  for (const s of ['pricing', 'sales_process', 'ai_rules', 'costs', 'definitions', 'sops', 'lessons']) {
     for (const e of entriesIn(s)) assert.equal(e.audience, 'staff', e.id)
   }
   assert.equal(entryById('money_terms.tax_pointer')!.audience, 'staff')
@@ -119,4 +119,66 @@ test('validators: response clocks are named numbers', () => {
   assert.equal(e.validate({ newInHoursMinutes: 10 }).ok, true)
   assert.equal(e.validate({ newInHoursMinutes: -1 }).ok, false)
   assert.equal(e.validate([]).ok, false)
+})
+
+// ─── SOPs ───────────────────────────────────────────────────────────────────
+
+const SOP = { title: 'Install day', steps: ['Timers set and tested.', 'After photos taken.'], owner_role: 'Crew lead', updated: '2026-11-16' }
+
+test('SOPs: one entry per slot, staff only, unset allowed, unwritten slots say so', () => {
+  assert.deepEqual(entriesIn('sops').map((e) => e.key), SOP_SLOTS.map((s) => s.key))
+  for (const e of entriesIn('sops')) {
+    assert.equal(e.audience, 'staff', e.id)
+    assert.equal(e.kind, 'sop', e.id)
+    assert.equal(e.nullable, true, e.id)
+    assert.deepEqual(e.validate(null), { ok: true, value: null })
+  }
+  for (const slot of SOP_SLOTS.filter((s) => !s.written)) assert.equal(entryById(`sops.${slot.key}`)!.help, SOP_NOT_WRITTEN)
+  for (const id of ['sops.install_day', 'sops.takedown', 'sops.repair_call', 'sops.new_lead', 'sops.quote_follow_up', 'sops.rebook']) {
+    assert.ok(entryById(id), id)
+  }
+})
+
+test('SOPs: a title of 80 characters at most, 1 to 25 steps of 300 at most, trimmed', () => {
+  const e = entryById('sops.install_day')!
+  assert.deepEqual(e.validate({ ...SOP, title: '  Install day ', steps: [' One. '] }), {
+    ok: true,
+    value: { title: 'Install day', steps: ['One.'], owner_role: 'Crew lead', updated: '2026-11-16' },
+  })
+  assert.equal(e.validate({ ...SOP, title: 'x'.repeat(80) }).ok, true)
+  assert.equal(e.validate({ ...SOP, title: 'x'.repeat(81) }).ok, false)
+  assert.equal(e.validate({ ...SOP, title: ' ' }).ok, false)
+  assert.equal(e.validate({ ...SOP, steps: [] }).ok, false)
+  assert.equal(e.validate({ ...SOP, steps: Array.from({ length: 25 }, (_, i) => `Step ${i}.`) }).ok, true)
+  assert.equal(e.validate({ ...SOP, steps: Array.from({ length: 26 }, (_, i) => `Step ${i}.`) }).ok, false)
+  assert.equal(e.validate({ ...SOP, steps: ['x'.repeat(300)] }).ok, true)
+  assert.equal(e.validate({ ...SOP, steps: ['x'.repeat(301)] }).ok, false)
+  assert.equal(e.validate({ ...SOP, steps: ['ok', '  '] }).ok, false)
+  assert.equal(e.validate({ ...SOP, steps: [5] }).ok, false)
+  assert.equal(e.validate({ ...SOP, owner_role: '' }).ok, false)
+  assert.equal(e.validate({ ...SOP, updated: '16/11/2026' }).ok, false)
+  assert.equal(e.validate(['not', 'an', 'sop']).ok, false)
+})
+
+// ─── Lessons carry no personal data ─────────────────────────────────────────
+
+test('lessons: an email address or a phone number is refused, in any field', () => {
+  const e = entryById('lessons.log')!
+  const base = { title: 't', what_happened: 'w', cost: '', rule: 'r' }
+  assert.equal(e.validate([{ ...base, what_happened: 'Wrote to jane.doe@example.com twice.' }]).ok, false)
+  assert.equal(e.validate([{ ...base, cost: 'Called (469) 555-0142 for nothing.' }]).ok, false)
+  assert.equal(e.validate([{ ...base, rule: 'Text 972-555-0199 first.' }]).ok, false)
+  assert.equal(e.validate([{ ...base, title: 'Lead +19725550199 lost' }]).ok, false)
+  assert.equal(e.validate([{ ...base, what_happened: 'Number 9725550199 was wrong.' }]).ok, false)
+  const refused = e.validate([base, { ...base, rule: 'Mail a@b.co' }])
+  assert.equal(refused.ok, false)
+  assert.match(refused.ok ? '' : refused.error, /Item 2: "rule" contains an email address/)
+})
+
+test('lessons: ordinary numbers, dates, sizes and money are not mistaken for contact details', () => {
+  const e = entryById('lessons.log')!
+  const text = 'On 2026-11-14 the budget went from $75 to $120; check at 390 × 844; PR #568 and #574; 235 runs; ~150 ZIP codes; 08:00-20:00.'
+  assert.equal(e.validate([{ title: 'Dates (2026-11-16)', what_happened: text, cost: '', rule: text }]).ok, true)
+  assert.deepEqual(personalDataIn(text), [])
+  assert.deepEqual(personalDataIn('info@frostylighting.com, (972) 267-3719'), ['an email address', 'a phone number'])
 })
