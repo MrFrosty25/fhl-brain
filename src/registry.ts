@@ -82,7 +82,7 @@ export const SECTIONS: readonly SectionDef[] = [
   { key: 'season', label: 'Season', help: 'When the season starts and when removal begins.' },
   { key: 'sales_process', label: 'Sales process', help: 'Follow-up timing, response clocks and lost reasons.' },
   { key: 'ai_rules', label: 'AI rules', help: 'What the assistants may and may not say.' },
-  { key: 'costs', label: 'Costs', help: 'What a job costs us. Not recorded yet.' },
+  { key: 'costs', label: 'Costs', help: 'What a job costs us: what we pay for a day of install, and what is not recorded yet.' },
   { key: 'definitions', label: 'Definitions', help: 'What counts as a lead, a close and a season, so every report agrees.' },
   { key: 'sops', label: 'SOPs', help: 'How we do each job, step by step. Staff only.' },
   { key: 'lessons', label: 'Lessons', help: 'Every mistake, what it cost, and the rule that prevents it.' },
@@ -514,18 +514,26 @@ export const REGISTRY: readonly RegistryEntry[] = [
   ...section('season', [
     { key: 'start_month', label: 'Season starts', help: SEASON_UNDECIDED, audience: S, kind: 'number', validate: intValidator(1, 12, 'Month'), nullable: true },
     { key: 'removal_date', label: 'Removal starts', help: 'Month and day removal begins after the holidays (MM-DD).', audience: C, kind: 'text', validate: textValidator(5, MONTH_DAY) },
+    // Owner, 2026-11-16: "We should be hanging in October." A fact for staff,
+    // NOT the reporting-season boundary (`start_month` stays undecided).
+    { key: 'install_start_month', label: 'We start hanging lights', help: 'The month installs begin (1-12).', audience: S, kind: 'number', validate: intValidator(1, 12, 'Month') },
   ]),
   ...section('sales_process', [
     { key: 'follow_up_hours', label: 'Follow-up timing', help: 'Hours after our last message when each follow-up goes out.', audience: S, kind: 'list', validate: listValidator({ items: 'number', max: 3, ascending: true }) },
     { key: 'response_clocks', label: 'Response clocks', help: 'How long each step may wait before its badge goes red.', audience: S, kind: 'json', validate: objectOfNumbers },
     { key: 'lost_reasons', label: 'Lost reasons', help: 'The one list of reasons a lead is lost.', audience: S, kind: 'json', validate: recordList([{ name: 'key', max: 40 }, { name: 'label', max: 80 }], 30) },
     { key: 'went_quiet_days', label: 'Went quiet after', help: 'Days of silence after a quote before a lead counts as lost.', audience: S, kind: 'number', validate: intValidator(1, 365, 'Days') },
+    // Owner, 2026-11-16: "stay in touch all year once per quarter."
+    { key: 'stay_in_touch', label: 'Staying in touch', help: 'How often we reach out to every client through the year.', audience: S, kind: 'text', validate: LINE },
   ]),
   ...section('ai_rules', [
     { key: 'staff_names', label: 'Names the assistants never use', help: 'Customers never hear a staff name from a bot.', audience: S, kind: 'list', validate: listValidator({ items: 'text', max: 50, itemMax: 60 }) },
     { key: 'average_home', label: 'The average home, in one sentence', help: 'The only sentence a bot may use about a typical price.', audience: S, kind: 'long_text', validate: PARA },
   ]),
   ...section('costs', [
+    // Owner, 2026-11-16: what an install subcontractor is paid for a day. Named
+    // by role, never by person.
+    { key: 'install_sub_per_day', label: 'Install sub, per day', help: 'What we pay an install subcontractor for a day.', audience: S, kind: 'money_cents', validate: centsValidator(10_000_000) },
     { key: 'labor_per_crew_hour', label: 'Labour per crew hour', help: 'What an hour of a crew costs us. Not recorded yet.', audience: S, kind: 'money_cents', validate: centsValidator(1_000_000), nullable: true },
     { key: 'material_per_foot', label: 'Material per foot', help: 'What a foot of lights costs us. Not recorded yet.', audience: S, kind: 'money_cents', validate: centsValidator(100_000), nullable: true },
   ]),
