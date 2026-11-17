@@ -38,6 +38,16 @@ export type Kind =
 
 export type Validation = { readonly ok: true; readonly value: unknown } | { readonly ok: false; readonly error: string }
 
+/**
+ * What a validator may need to know about the business itself. Today: the
+ * email domains that are OURS, so a lesson may name our own inbox and no one
+ * else's. Built from the Brain's identity values (`validationContextFrom`),
+ * never typed.
+ */
+export interface ValidationContext {
+  readonly ownEmailDomains?: readonly string[]
+}
+
 export interface SectionDef {
   readonly key: string
   readonly label: string
@@ -56,7 +66,7 @@ export interface RegistryEntry {
   /** True when "not set yet" (null) is a legitimate value. */
   readonly nullable: boolean
   /** Checks a value and returns it cleaned (strings trimmed). */
-  readonly validate: (value: unknown) => Validation
+  readonly validate: (value: unknown, ctx?: ValidationContext) => Validation
 }
 
 // ─── The sections, in the order the screen shows them ───────────────────────
@@ -237,22 +247,76 @@ function recordList(fields: readonly { name: string; max: number; optional?: boo
 // A lesson is about what WE did, never about who it happened to. Owner,
 // 2026-11-16: lessons carry no customer names and no personal data. A name
 // cannot be told from any other word, but an email address and a phone number
-// can, so those two are refused outright.
+// can, so those two are refused — except an address on one of OUR OWN email
+// domains (`ctx.ownEmailDomains`, read from the Brain's identity), which is
+// the business, not a person.
 
-const EMAIL_IN_TEXT = /[^\s@<>()]+@[^\s@<>()]+\.[a-z]{2,}/i
-const PHONE_IN_TEXT = /(?:\+?1[\s.-]?)?(?:\(\d{3}\)\s?|\b\d{3}[\s.-])\d{3}[\s.-]\d{4}\b|\b\d{10}\b|\+1\d{10}\b/
+const EMAIL_IN_TEXT = /[^\s@<>()"',;:]+@([^\s@<>()"',;:]+\.[a-z]{2,})/gi
+
+/** Phone-shaped: separators, a +1, or area-code parentheses. */
+const PHONE_SHAPED = [
+  /(?<!\d)(?:\+?1[\s.-]?)?\(\d{3}\)\s?\d{3}[\s.-]?\d{4}(?!\d)/,
+  /(?<![\d-])\d{3}[\s.-]\d{3}[\s.-]\d{4}(?![\d-])/,
+  /\+1[\s.-]?\d{3}[\s.-]?\d{3}[\s.-]?\d{4}(?!\d)/,
+]
+
+/**
+ * Exactly ten digits, touching no other digit, that could be a North American
+ * number (area code and exchange both start 2–9 — so a Unix timestamp, which
+ * starts with 1, is not one), and not in an obvious id context: "#", "id" or
+ * "PR" right before it.
+ */
+const TEN_DIGITS = /(?<![\d.,])\d{10}(?![\d.,]?\d)/g
+const NANP = /^[2-9]\d{2}[2-9]\d{6}$/
+const ID_CONTEXT = /(?:#|\bid|\bpr)[\s:#=-]*$/i
+
+function ownDomain(domain: string, own: readonly string[]): boolean {
+  const d = domain.toLowerCase().replace(/\.$/, '')
+  return own.some((o) => d === o || d.endsWith(`.${o}`))
+}
 
 /** What personal data a piece of text carries, in plain words; empty when none. */
-export function personalDataIn(text: string): readonly string[] {
+export function personalDataIn(text: string, ctx: ValidationContext = {}): readonly string[] {
   const found: string[] = []
-  if (EMAIL_IN_TEXT.test(text)) found.push('an email address')
-  if (PHONE_IN_TEXT.test(text)) found.push('a phone number')
+  const own = (ctx.ownEmailDomains ?? []).map((d) => d.toLowerCase())
+  for (const m of text.matchAll(EMAIL_IN_TEXT)) {
+    if (!ownDomain(m[1], own)) {
+      found.push('an email address')
+      break
+    }
+  }
+  let phone = PHONE_SHAPED.some((re) => re.test(text))
+  if (!phone) {
+    for (const m of text.matchAll(TEN_DIGITS)) {
+      if (!NANP.test(m[0])) continue
+      if (ID_CONTEXT.test(text.slice(0, m.index ?? 0))) continue
+      phone = true
+      break
+    }
+  }
+  if (phone) found.push('a phone number')
   return found
+}
+
+/** The email domains of the business, read off the Brain's identity values. */
+export function validationContextFrom(values: Readonly<Record<string, unknown>> | null | undefined): ValidationContext {
+  const out = new Set<string>()
+  const add = (d: unknown) => {
+    if (typeof d === 'string' && /^(?:[a-z0-9-]+\.)+[a-z]{2,}$/i.test(d.trim())) out.add(d.trim().toLowerCase())
+  }
+  if (values) {
+    add(values['identity.email_domain'])
+    for (const id of ['identity.email', 'identity.email_sender']) {
+      const v = values[id]
+      if (typeof v === 'string') for (const m of v.matchAll(EMAIL_IN_TEXT)) add(m[1])
+    }
+  }
+  return { ownEmailDomains: [...out] }
 }
 
 /** Run `check`, then refuse any text field that carries personal data. */
 function noPersonalData(check: (value: unknown) => Validation) {
-  return (value: unknown): Validation => {
+  return (value: unknown, ctx?: ValidationContext): Validation => {
     const r = check(value)
     if (!r.ok) return r
     const items = Array.isArray(r.value) ? r.value : [r.value]
@@ -260,13 +324,16 @@ function noPersonalData(check: (value: unknown) => Validation) {
       const fields = isPlainObject(item) ? Object.entries(item) : [['text', item] as const]
       for (const [name, v] of fields) {
         if (typeof v !== 'string') continue
-        const found = personalDataIn(v)
+        const found = personalDataIn(v, ctx)
         if (found.length) return bad(`Item ${i + 1}: "${name}" contains ${found.join(' and ')}. Lessons carry no personal data.`)
       }
     }
     return r
   }
 }
+
+/** The lessons log's caps: a sane total for anything a tool reads whole. */
+export const LESSON_LIMITS = { maxLessons: 200, field: 600 } as const
 
 // ─── SOPs ───────────────────────────────────────────────────────────────────
 
@@ -326,8 +393,8 @@ export const SOP_SLOTS: readonly { readonly key: string; readonly label: string;
 
 export const SOP_NOT_WRITTEN = 'Not written yet.'
 
-function nullable(check: (value: unknown) => Validation) {
-  return (value: unknown): Validation => (value === null ? ok(null) : check(value))
+function nullable(check: (value: unknown, ctx?: ValidationContext) => Validation) {
+  return (value: unknown, ctx?: ValidationContext): Validation => (value === null ? ok(null) : check(value, ctx))
 }
 
 // ─── The entries ────────────────────────────────────────────────────────────
@@ -338,7 +405,7 @@ interface Spec {
   help: string
   audience: Audience
   kind: Kind
-  validate: (value: unknown) => Validation
+  validate: (value: unknown, ctx?: ValidationContext) => Validation
   nullable?: boolean
 }
 
@@ -489,12 +556,12 @@ export const REGISTRY: readonly RegistryEntry[] = [
       validate: noPersonalData(
         recordList(
           [
-            { name: 'title', max: 200 },
-            { name: 'what_happened', max: 2000 },
-            { name: 'cost', max: 1000, optional: true },
-            { name: 'rule', max: 2000 },
+            { name: 'title', max: LESSON_LIMITS.field },
+            { name: 'what_happened', max: LESSON_LIMITS.field },
+            { name: 'cost', max: LESSON_LIMITS.field, optional: true },
+            { name: 'rule', max: LESSON_LIMITS.field },
           ],
-          500,
+          LESSON_LIMITS.maxLessons,
           0,
         ),
       ),

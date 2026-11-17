@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { REGISTRY, SECTIONS, SOP_NOT_WRITTEN, SOP_SLOTS, entryById, entriesIn, personalDataIn } from '../src/registry.ts'
+import { LESSON_LIMITS, REGISTRY, SECTIONS, SOP_NOT_WRITTEN, SOP_SLOTS, entryById, entriesIn, personalDataIn, validationContextFrom } from '../src/registry.ts'
 
 test('every entry belongs to a declared section, and every section has entries', () => {
   const sections = new Set(SECTIONS.map((s) => s.key))
@@ -180,5 +180,52 @@ test('lessons: ordinary numbers, dates, sizes and money are not mistaken for con
   const text = 'On 2026-11-14 the budget went from $75 to $120; check at 390 × 844; PR #568 and #574; 235 runs; ~150 ZIP codes; 08:00-20:00.'
   assert.equal(e.validate([{ title: 'Dates (2026-11-16)', what_happened: text, cost: '', rule: text }]).ok, true)
   assert.deepEqual(personalDataIn(text), [])
-  assert.deepEqual(personalDataIn('info@frostylighting.com, (972) 267-3719'), ['an email address', 'a phone number'])
+  assert.deepEqual(personalDataIn('jane@gmail.com, (972) 267-3719'), ['an email address', 'a phone number'])
+})
+
+test('lessons: our own email domains are allowed, read from the identity values', () => {
+  const identity = {
+    'identity.email': 'info@ourshop.example',
+    'identity.email_domain': 'mail.ourshop-llc.example',
+    'identity.email_sender': 'Our Shop <hello@ourshop-llc.example>',
+  }
+  const ctx = validationContextFrom(identity)
+  assert.deepEqual([...(ctx.ownEmailDomains ?? [])].sort(), ['mail.ourshop-llc.example', 'ourshop-llc.example', 'ourshop.example'])
+  const e = entryById('lessons.log')!
+  const base = { title: 't', what_happened: 'w', cost: '', rule: 'r' }
+  assert.equal(e.validate([{ ...base, rule: 'Alerts go to info@ourshop.example.' }], ctx).ok, true)
+  assert.equal(e.validate([{ ...base, rule: 'Bounced from leads@mail.ourshop-llc.example' }], ctx).ok, true)
+  assert.equal(e.validate([{ ...base, rule: 'Wrote to jane@gmail.com' }], ctx).ok, false)
+  assert.equal(e.validate([{ ...base, rule: 'Wrote to x@ourshop.example.evil.com' }], ctx).ok, false)
+  // Without a context, every address is refused.
+  assert.equal(e.validate([{ ...base, rule: 'Alerts go to info@ourshop.example.' }]).ok, false)
+})
+
+test('lessons: phone-shaped numbers are refused; timestamps and ids are not phones', () => {
+  const phones = ['(469) 555-0142', '469-555-0142', '469.555.0142', '469 555 0142', '+1 469 555 0142', '+14695550142', '1 (469) 555-0142', 'call 4695550142 now']
+  for (const p of phones) assert.deepEqual(personalDataIn(p), ['a phone number'], p)
+  const notPhones = [
+    'Unix time 1731715200 was logged',
+    'lead id 4695550142',
+    'id: 4695550142',
+    'PR 4695550142',
+    '#4695550142',
+    'order 12345678901 (eleven digits)',
+    'ref 0123456789',
+    '2026-11-14 and 2026-11-16',
+    '$1,000 minimum, 390 × 844 screen',
+    'version 1.2.3.4567890123',
+  ]
+  for (const t of notPhones) assert.deepEqual(personalDataIn(t), [], t)
+})
+
+test('lessons: capped at 200 lessons of 600 characters a field, and the maximum passes', () => {
+  const e = entryById('lessons.log')!
+  const field = 'x'.repeat(LESSON_LIMITS.field)
+  const max = Array.from({ length: LESSON_LIMITS.maxLessons }, () => ({ title: field, what_happened: field, cost: field, rule: field }))
+  assert.equal(LESSON_LIMITS.maxLessons, 200)
+  assert.equal(LESSON_LIMITS.field, 600)
+  assert.equal(e.validate(max).ok, true)
+  assert.equal(e.validate([...max, max[0]]).ok, false)
+  assert.equal(e.validate([{ ...max[0], rule: `${field}x` }]).ok, false)
 })
