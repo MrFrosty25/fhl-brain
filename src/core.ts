@@ -31,7 +31,7 @@
 //
 // Pure: no I/O except through the injected `db`. No imports outside this folder.
 
-import { REGISTRY, entryById, type Audience, type Kind, type RegistryEntry } from './registry.ts'
+import { REGISTRY, entryById, validationContextFrom, type Audience, type Kind, type RegistryEntry, type ValidationContext } from './registry.ts'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -165,9 +165,9 @@ function rowId(row: Pick<BrainRow, 'section' | 'key'>): string {
 
 /** Every registry entry with no default, or a default its own validator refuses. */
 /** Run a validator without letting it throw. */
-export function safeValidate(entry: RegistryEntry, value: unknown): { ok: true; value: unknown } | { ok: false; error: string } {
+export function safeValidate(entry: RegistryEntry, value: unknown, ctx?: ValidationContext): { ok: true; value: unknown } | { ok: false; error: string } {
   try {
-    return entry.validate(value)
+    return entry.validate(value, ctx)
   } catch (err) {
     return { ok: false, error: `validator failed (${err instanceof Error ? err.message : 'unknown'})` }
   }
@@ -176,12 +176,13 @@ export function safeValidate(entry: RegistryEntry, value: unknown): { ok: true; 
 export function checkDefaults(defaults: BrainDefaults): readonly string[] {
   const out: string[] = []
   if (!defaults) return ['no defaults given']
+  const ctx = validationContextFrom(defaults)
   for (const e of REGISTRY) {
     if (!(e.id in defaults)) {
       out.push(`${e.id}: no default`)
       continue
     }
-    const r = safeValidate(e, defaults[e.id])
+    const r = safeValidate(e, defaults[e.id], ctx)
     if (!r.ok) out.push(`${e.id}: default refused (${r.error})`)
   }
   for (const id of Object.keys(defaults)) if (!entryById(id)) out.push(`${id}: not in the registry`)
@@ -199,6 +200,7 @@ export function resolveBrain(rows: readonly BrainRow[], given: BrainDefaults | n
   const problems: string[] = []
   const invalid: string[] = []
   if (!given) problems.push('No built-in values were given; unset entries are null.')
+  const ctx = validationContextFrom(defaults)
   const byId = new Map<string, BrainRow>()
   for (const row of rows ?? []) {
     if (!row || typeof row.section !== 'string' || typeof row.key !== 'string') {
@@ -220,7 +222,7 @@ export function resolveBrain(rows: readonly BrainRow[], given: BrainDefaults | n
     let source: Source = 'default'
     if (row && row.version >= 1) {
       const stored = unwrap(row.value)
-      const check = stored === undefined ? null : safeValidate(e, stored)
+      const check = stored === undefined ? null : safeValidate(e, stored, ctx)
       if (check && check.ok) {
         value = check.value
         source = 'brain'
@@ -325,10 +327,10 @@ export type DraftPlan =
  * live now: a draft equal to it clears the draft rather than storing a
  * change that changes nothing.
  */
-export function planDraft(id: string, value: unknown, current?: unknown): DraftPlan {
+export function planDraft(id: string, value: unknown, current?: unknown, ctx?: ValidationContext): DraftPlan {
   const entry: RegistryEntry | null = entryById(id)
   if (!entry) return { ok: false, error: `Unknown entry "${id}".` }
-  const check = safeValidate(entry, value)
+  const check = safeValidate(entry, value, ctx)
   if (!check.ok) return { ok: false, error: `${entry.label}: ${check.error}` }
   const unchanged = current !== undefined && sameValue(check.value, current)
   return {
@@ -382,7 +384,7 @@ export interface PublishPlan {
 export function planPublish(
   rows: readonly BrainRow[],
   keys: readonly string[] | 'all',
-  meta: { readonly by: string | null; readonly note?: string | null; readonly now: string },
+  meta: { readonly by: string | null; readonly note?: string | null; readonly now: string; readonly ctx?: ValidationContext },
 ): PublishPlan {
   const want = keys === 'all' ? null : new Set(keys)
   const updates: PublishUpdate[] = []
@@ -400,7 +402,7 @@ export function planPublish(
       refused.push({ id, error: 'not in the registry' })
       continue
     }
-    const check = safeValidate(entry, draft)
+    const check = safeValidate(entry, draft, meta.ctx)
     if (!check.ok) {
       refused.push({ id, error: check.error })
       continue
@@ -470,10 +472,10 @@ export function planDiscard(rows: readonly BrainRow[], keys: readonly string[] |
  * Put an old published version back — AS A DRAFT. It goes live when it is
  * published, like every other change, so a revert can be checked first.
  */
-export function planRevert(version: Pick<BrainVersionRow, 'section' | 'key' | 'value'>, current?: unknown): DraftPlan {
+export function planRevert(version: Pick<BrainVersionRow, 'section' | 'key' | 'value'>, current?: unknown, ctx?: ValidationContext): DraftPlan {
   const value = unwrap(version.value)
   if (value === undefined) return { ok: false, error: 'That version has no value.' }
-  return planDraft(`${version.section}.${version.key}`, value, current)
+  return planDraft(`${version.section}.${version.key}`, value, current, ctx)
 }
 
 // ─── Export and import ──────────────────────────────────────────────────────
@@ -533,6 +535,7 @@ export function importAsDrafts(doc: unknown, current: Brain): ImportPlan {
   const unknown: string[] = []
   const errors: { id: string; error: string }[] = []
   let unchanged = 0
+  const ctx = validationContextFrom(current.values)
   for (const [id, item] of Object.entries(raw as Record<string, unknown>)) {
     const entry = entryById(id)
     if (!entry) {
@@ -543,7 +546,7 @@ export function importAsDrafts(doc: unknown, current: Brain): ImportPlan {
       typeof item === 'object' && item !== null && !Array.isArray(item) && 'value' in item
         ? (item as { value: unknown }).value
         : item
-    const plan = planDraft(id, value, now.get(id))
+    const plan = planDraft(id, value, now.get(id), ctx)
     if (!plan.ok) {
       errors.push({ id, error: plan.error })
       continue
