@@ -229,3 +229,34 @@ test('lessons: capped at 200 lessons of 600 characters a field, and the maximum 
   assert.equal(e.validate([...max, max[0]]).ok, false)
   assert.equal(e.validate([{ ...max[0], rule: `${field}x` }]).ok, false)
 })
+
+test('owner, 2026-11-16: the install sub day rate, when we start hanging, and staying in touch', () => {
+  const sub = entryById('costs.install_sub_per_day')!
+  assert.equal(sub.audience, 'staff')
+  assert.equal(sub.kind, 'money_cents')
+  assert.equal(sub.label, 'Install sub, per day')
+  assert.equal(sub.help, 'What we pay an install subcontractor for a day.')
+  assert.deepEqual(sub.validate(25_000), { ok: true, value: 25_000 })
+  assert.equal(sub.validate(-1).ok, false)
+  assert.equal(sub.validate(250.5).ok, false)
+  // The other two costs stay unset until the owner records them.
+  assert.equal(entryById('costs.labor_per_crew_hour')!.nullable, true)
+  assert.equal(entryById('costs.material_per_foot')!.nullable, true)
+
+  const hang = entryById('season.install_start_month')!
+  assert.equal(hang.audience, 'staff')
+  assert.equal(hang.label, 'We start hanging lights')
+  assert.equal(hang.validate(10).ok, true)
+  assert.equal(hang.validate(0).ok, false)
+  assert.equal(hang.validate(13).ok, false)
+  // The reporting-season boundary is still undecided, and separate.
+  assert.equal(entryById('season.start_month')!.nullable, true)
+  assert.equal(entryById('definitions.season')!.nullable, true)
+
+  const touch = entryById('sales_process.stay_in_touch')!
+  assert.equal(touch.audience, 'staff')
+  assert.equal(touch.kind, 'text')
+  assert.equal(touch.label, 'Staying in touch')
+  assert.equal(touch.validate('We stay in touch with every client all year, once per quarter.').ok, true)
+  assert.equal(touch.validate('   ').ok, false)
+})
