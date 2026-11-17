@@ -34,6 +34,7 @@ export type Kind =
   | 'rate_ladder'
   | 'color'
   | 'json'
+  | 'sop'
 
 export type Validation = { readonly ok: true; readonly value: unknown } | { readonly ok: false; readonly error: string }
 
@@ -73,6 +74,7 @@ export const SECTIONS: readonly SectionDef[] = [
   { key: 'ai_rules', label: 'AI rules', help: 'What the assistants may and may not say.' },
   { key: 'costs', label: 'Costs', help: 'What a job costs us. Not recorded yet.' },
   { key: 'definitions', label: 'Definitions', help: 'What counts as a lead, a close and a season, so every report agrees.' },
+  { key: 'sops', label: 'SOPs', help: 'How we do each job, step by step. Staff only.' },
   { key: 'lessons', label: 'Lessons', help: 'Every mistake, what it cost, and the rule that prevents it.' },
 ]
 
@@ -230,6 +232,100 @@ function recordList(fields: readonly { name: string; max: number; optional?: boo
   }
 }
 
+// ─── Personal data ──────────────────────────────────────────────────────────
+//
+// A lesson is about what WE did, never about who it happened to. Owner,
+// 2026-11-16: lessons carry no customer names and no personal data. A name
+// cannot be told from any other word, but an email address and a phone number
+// can, so those two are refused outright.
+
+const EMAIL_IN_TEXT = /[^\s@<>()]+@[^\s@<>()]+\.[a-z]{2,}/i
+const PHONE_IN_TEXT = /(?:\+?1[\s.-]?)?(?:\(\d{3}\)\s?|\b\d{3}[\s.-])\d{3}[\s.-]\d{4}\b|\b\d{10}\b|\+1\d{10}\b/
+
+/** What personal data a piece of text carries, in plain words; empty when none. */
+export function personalDataIn(text: string): readonly string[] {
+  const found: string[] = []
+  if (EMAIL_IN_TEXT.test(text)) found.push('an email address')
+  if (PHONE_IN_TEXT.test(text)) found.push('a phone number')
+  return found
+}
+
+/** Run `check`, then refuse any text field that carries personal data. */
+function noPersonalData(check: (value: unknown) => Validation) {
+  return (value: unknown): Validation => {
+    const r = check(value)
+    if (!r.ok) return r
+    const items = Array.isArray(r.value) ? r.value : [r.value]
+    for (const [i, item] of items.entries()) {
+      const fields = isPlainObject(item) ? Object.entries(item) : [['text', item] as const]
+      for (const [name, v] of fields) {
+        if (typeof v !== 'string') continue
+        const found = personalDataIn(v)
+        if (found.length) return bad(`Item ${i + 1}: "${name}" contains ${found.join(' and ')}. Lessons carry no personal data.`)
+      }
+    }
+    return r
+  }
+}
+
+// ─── SOPs ───────────────────────────────────────────────────────────────────
+
+/** An SOP as stored: a title, ordered steps, who owns it and when it changed. */
+export interface Sop {
+  readonly title: string
+  readonly steps: readonly string[]
+  readonly owner_role: string
+  /** YYYY-MM-DD. */
+  readonly updated: string
+}
+
+export const SOP_LIMITS = { title: 80, minSteps: 1, maxSteps: 25, step: 300, ownerRole: 60 } as const
+
+const ISO_DATE = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$/
+
+function sopValidator(value: unknown): Validation {
+  if (!isPlainObject(value)) return bad('An SOP needs a title, steps, an owner and a date.')
+  const title = typeof value.title === 'string' ? value.title.trim() : ''
+  if (!title) return bad('An SOP needs a title.')
+  if (title.length > SOP_LIMITS.title) return bad(`The title is longer than ${SOP_LIMITS.title} characters.`)
+  if (!Array.isArray(value.steps)) return bad('The steps must be a list.')
+  if (value.steps.length < SOP_LIMITS.minSteps) return bad('An SOP needs at least one step.')
+  if (value.steps.length > SOP_LIMITS.maxSteps) return bad(`At most ${SOP_LIMITS.maxSteps} steps.`)
+  const steps: string[] = []
+  for (const [i, raw] of value.steps.entries()) {
+    if (typeof raw !== 'string' || !raw.trim()) return bad(`Step ${i + 1} is empty.`)
+    const t = raw.trim()
+    if (t.length > SOP_LIMITS.step) return bad(`Step ${i + 1} is longer than ${SOP_LIMITS.step} characters.`)
+    steps.push(t)
+  }
+  const owner = typeof value.owner_role === 'string' ? value.owner_role.trim() : ''
+  if (!owner) return bad('Say who owns this SOP.')
+  if (owner.length > SOP_LIMITS.ownerRole) return bad(`"Owner" is longer than ${SOP_LIMITS.ownerRole} characters.`)
+  const updated = typeof value.updated === 'string' ? value.updated.trim() : ''
+  if (!ISO_DATE.test(updated)) return bad('"Updated" must be a date as YYYY-MM-DD.')
+  return ok({ title, steps, owner_role: owner, updated })
+}
+
+/**
+ * The SOP slots, in the order the screen shows them. A CLOSED LIST like every
+ * other entry: a new SOP is a new slot here. `written: false` marks a slot no
+ * written procedure exists for yet; its help says so and its built-in value
+ * is null until the owner writes one.
+ */
+export const SOP_SLOTS: readonly { readonly key: string; readonly label: string; readonly written: boolean }[] = [
+  { key: 'new_lead', label: 'A new lead', written: true },
+  { key: 'quote_follow_up', label: 'Following up a quote', written: true },
+  { key: 'rebook', label: 'A returning client (rebook)', written: true },
+  { key: 'install_day', label: 'Install day', written: true },
+  { key: 'repair_call', label: 'A repair call in season', written: true },
+  { key: 'takedown', label: 'Takedown', written: true },
+  { key: 'design_and_quote', label: 'Designing and pricing a quote', written: false },
+  { key: 'hoa_commercial_proposal', label: 'An HOA or commercial proposal', written: false },
+  { key: 'balance_collection', label: 'Collecting the balance', written: false },
+]
+
+export const SOP_NOT_WRITTEN = 'Not written yet.'
+
 function nullable(check: (value: unknown) => Validation) {
   return (value: unknown): Validation => (value === null ? ok(null) : check(value))
 }
@@ -371,22 +467,36 @@ export const REGISTRY: readonly RegistryEntry[] = [
     { key: 'close', label: 'A close', help: "What counts as a won job, built from the app's won stages.", audience: S, kind: 'long_text', validate: PARA },
     { key: 'season', label: 'A season', help: SEASON_UNDECIDED, audience: S, kind: 'long_text', validate: PARA, nullable: true },
   ]),
+  ...section(
+    'sops',
+    SOP_SLOTS.map((slot) => ({
+      key: slot.key,
+      label: slot.label,
+      help: slot.written ? 'The steps, in order. Edit a step, add one, remove one or move it.' : SOP_NOT_WRITTEN,
+      audience: S,
+      kind: 'sop' as const,
+      validate: sopValidator,
+      nullable: true,
+    })),
+  ),
   ...section('lessons', [
     {
       key: 'log',
       label: 'Lessons',
-      help: 'What happened, what it cost, and the rule that prevents it.',
+      help: 'What happened, what it cost, and the rule that prevents it. No customer names, emails or phone numbers.',
       audience: S,
       kind: 'json',
-      validate: recordList(
-        [
-          { name: 'title', max: 200 },
-          { name: 'what_happened', max: 2000 },
-          { name: 'cost', max: 1000, optional: true },
-          { name: 'rule', max: 2000 },
-        ],
-        500,
-        0,
+      validate: noPersonalData(
+        recordList(
+          [
+            { name: 'title', max: 200 },
+            { name: 'what_happened', max: 2000 },
+            { name: 'cost', max: 1000, optional: true },
+            { name: 'rule', max: 2000 },
+          ],
+          500,
+          0,
+        ),
       ),
     },
   ]),
