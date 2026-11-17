@@ -4,6 +4,7 @@ import { REGISTRY } from '../src/registry.ts'
 import {
   brainValue,
   checkDefaults,
+  safeValidate,
   exportBrain,
   importAsDrafts,
   planDiscard,
@@ -135,6 +136,44 @@ test('an invalid stored value or an unknown key is ignored and named', () => {
   assert.equal(brain.problems.length, 3)
 })
 
+test('ONE bad stored row falls back alone and is listed in invalid; the rest stays published', () => {
+  const brain = resolveBrain(
+    [
+      row({ section: 'brand', key: 'accent', value: wrap('not a colour') }),
+      row({ section: 'identity', key: 'brand_name', value: wrap('Kept') }),
+    ],
+    DEFAULTS,
+  )
+  assert.deepEqual(brain.invalid, ['brand.accent'])
+  assert.equal(brainValue(brain, 'brand.accent'), DEFAULTS['brand.accent'])
+  assert.equal(brainValue(brain, 'identity.brand_name'), 'Kept')
+  assert.equal(brain.unreadable, false)
+})
+
+test('a validator that throws is a refusal, not a crash', () => {
+  const entry = { ...REGISTRY[0], validate: () => { throw new Error('boom') } }
+  const r = safeValidate(entry, 'x')
+  assert.equal(r.ok, false)
+})
+
+test('null defaults or junk rows never throw', async () => {
+  const brain = resolveBrain([null as unknown as BrainRow, row({ section: 'identity', key: 'brand_name', value: wrap('X') })], null)
+  assert.equal(brainValue(brain, 'identity.brand_name'), 'X')
+  assert.equal(brainValue(brain, 'identity.phone'), null)
+  const read = await readBrain(fakeDb({ data: [], error: null }).db, ORG, null)
+  assert.equal(read.unreadable, false)
+  assert.deepEqual(checkDefaults(null as unknown as Record<string, unknown>), ['no defaults given'])
+})
+
+test('the season boundary is not decided: both season entries may be unset and say why', () => {
+  for (const id of ['season.start_month', 'definitions.season']) {
+    const e = REGISTRY.find((x) => x.id === id)!
+    assert.equal(e.nullable, true, id)
+    assert.match(e.help, /^Not decided: three parts of the app use different season start months \(July, August, September\)\. The owner needs to pick one\.$/)
+    assert.deepEqual(e.validate(null), { ok: true, value: null })
+  }
+})
+
 test('a null cost is a real value, stored in its envelope', () => {
   const brain = resolveBrain([row({ section: 'costs', key: 'labor_per_crew_hour', value: wrap(4500) })], DEFAULTS)
   assert.equal(brainValue(brain, 'costs.labor_per_crew_hour'), 4500)
@@ -195,7 +234,7 @@ test('planDraft validates, cleans, and clears a draft that changes nothing', () 
 
 test('planPublish: all, or only the picked ones; bumps versions; appends history', () => {
   const rows = [
-    row({ section: 'identity', key: 'brand_name', value: wrap('A'), version: 2, draft_value: wrap('B') }),
+    row({ section: 'identity', key: 'brand_name', value: wrap('A'), version: 2, draft_value: wrap('B'), draft_at: '2026-11-16T17:00:00.000Z' }),
     row({ section: 'identity', key: 'phone', value: wrap('x'), version: 0, draft_value: wrap('(555) 010-2222') }),
     row({ section: 'brand', key: 'accent', value: wrap('#000000'), version: 1, draft_value: wrap('nope') }),
     row({ section: 'brand', key: 'text', value: wrap('#ffffff'), version: 4 }),
@@ -206,6 +245,7 @@ test('planPublish: all, or only the picked ones; bumps versions; appends history
     ['row-identity.brand_name', 2, 3],
     ['row-identity.phone', 0, 1],
   ])
+  assert.deepEqual(all.updates.map((u) => u.expectDraftAt), ['2026-11-16T17:00:00.000Z', null])
   assert.deepEqual(all.updates[0].set.value, { v: 'B' })
   assert.equal(all.updates[0].set.draft_value, null)
   assert.equal(all.versions.length, 2)

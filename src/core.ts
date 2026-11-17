@@ -105,6 +105,11 @@ export interface Brain {
   readonly unreadable: boolean
   /** Anything ignored on the way, in plain words. Never a customer's data. */
   readonly problems: readonly string[]
+  /**
+   * Entries whose stored value failed (or broke) its validator. Each one alone
+   * falls back to its built-in value; the rest of the Brain is unaffected.
+   */
+  readonly invalid: readonly string[]
 }
 
 export interface ReadOptions {
@@ -159,14 +164,24 @@ function rowId(row: Pick<BrainRow, 'section' | 'key'>): string {
 }
 
 /** Every registry entry with no default, or a default its own validator refuses. */
+/** Run a validator without letting it throw. */
+export function safeValidate(entry: RegistryEntry, value: unknown): { ok: true; value: unknown } | { ok: false; error: string } {
+  try {
+    return entry.validate(value)
+  } catch (err) {
+    return { ok: false, error: `validator failed (${err instanceof Error ? err.message : 'unknown'})` }
+  }
+}
+
 export function checkDefaults(defaults: BrainDefaults): readonly string[] {
   const out: string[] = []
+  if (!defaults) return ['no defaults given']
   for (const e of REGISTRY) {
     if (!(e.id in defaults)) {
       out.push(`${e.id}: no default`)
       continue
     }
-    const r = e.validate(defaults[e.id])
+    const r = safeValidate(e, defaults[e.id])
     if (!r.ok) out.push(`${e.id}: default refused (${r.error})`)
   }
   for (const id of Object.keys(defaults)) if (!entryById(id)) out.push(`${id}: not in the registry`)
@@ -179,10 +194,17 @@ export function checkDefaults(defaults: BrainDefaults): readonly string[] {
  * The effective Brain: for every registry entry, the published value if there
  * is a good one, else the default. Rows for unknown keys are ignored.
  */
-export function resolveBrain(rows: readonly BrainRow[], defaults: BrainDefaults): Brain {
+export function resolveBrain(rows: readonly BrainRow[], given: BrainDefaults | null | undefined): Brain {
+  const defaults: BrainDefaults = given ?? {}
   const problems: string[] = []
+  const invalid: string[] = []
+  if (!given) problems.push('No built-in values were given; unset entries are null.')
   const byId = new Map<string, BrainRow>()
-  for (const row of rows) {
+  for (const row of rows ?? []) {
+    if (!row || typeof row.section !== 'string' || typeof row.key !== 'string') {
+      problems.push('a row with no section or key was ignored')
+      continue
+    }
     const id = rowId(row)
     if (!entryById(id)) {
       problems.push(`${id}: not in the registry, ignored`)
@@ -198,11 +220,12 @@ export function resolveBrain(rows: readonly BrainRow[], defaults: BrainDefaults)
     let source: Source = 'default'
     if (row && row.version >= 1) {
       const stored = unwrap(row.value)
-      const check = stored === undefined ? null : e.validate(stored)
+      const check = stored === undefined ? null : safeValidate(e, stored)
       if (check && check.ok) {
         value = check.value
         source = 'brain'
       } else {
+        invalid.push(e.id)
         problems.push(`${e.id}: published value is not valid, using the built-in value`)
       }
     }
@@ -226,7 +249,7 @@ export function resolveBrain(rows: readonly BrainRow[], defaults: BrainDefaults)
     }
   })
 
-  return { entries, values: valuesOf(entries), unreadable: false, problems }
+  return { entries, values: valuesOf(entries), unreadable: false, problems, invalid }
 }
 
 function valuesOf(entries: readonly ResolvedEntry[]): Record<string, unknown> {
@@ -243,11 +266,12 @@ export function filterBrain(brain: Brain, opts: ReadOptions = {}): Brain {
   if (opts.audience === 'customer') {
     entries = entries.filter((e) => e.audience === 'customer').map((e) => ({ ...e, draft: null }))
   }
-  return { ...brain, entries, values: valuesOf(entries) }
+  const keep = new Set(entries.map((e) => e.id))
+  return { ...brain, entries, values: valuesOf(entries), invalid: brain.invalid.filter((id) => keep.has(id)) }
 }
 
 /** The defaults alone, as a Brain. */
-export function defaultBrain(defaults: BrainDefaults, opts: ReadOptions = {}): Brain {
+export function defaultBrain(defaults: BrainDefaults | null | undefined, opts: ReadOptions = {}): Brain {
   return filterBrain(resolveBrain([], defaults), opts)
 }
 
@@ -258,7 +282,7 @@ export function defaultBrain(defaults: BrainDefaults, opts: ReadOptions = {}): B
 export async function readBrain(
   db: BrainDb,
   orgId: string,
-  defaults: BrainDefaults,
+  defaults: BrainDefaults | null | undefined,
   opts: ReadOptions = {},
 ): Promise<Brain> {
   try {
@@ -304,7 +328,7 @@ export type DraftPlan =
 export function planDraft(id: string, value: unknown, current?: unknown): DraftPlan {
   const entry: RegistryEntry | null = entryById(id)
   if (!entry) return { ok: false, error: `Unknown entry "${id}".` }
-  const check = entry.validate(value)
+  const check = safeValidate(entry, value)
   if (!check.ok) return { ok: false, error: `${entry.label}: ${check.error}` }
   const unchanged = current !== undefined && sameValue(check.value, current)
   return {
@@ -323,6 +347,11 @@ export interface PublishUpdate {
   readonly rowId: string
   /** Only update when the row is still at this version (optimistic lock). */
   readonly expectVersion: number
+  /**
+   * ...and still carries the draft that was read (its `draft_at`). A newer
+   * draft saved while publishing must neither go live unseen nor be wiped.
+   */
+  readonly expectDraftAt: string | null
   readonly set: {
     readonly value: Envelope
     readonly version: number
@@ -334,6 +363,13 @@ export interface PublishUpdate {
   }
 }
 
+/**
+ * `updates[i]` and `versions[i]` are one entry. THE ORDER TO CARRY IT OUT:
+ * insert `versions[i]` first (so a live value never lacks its history — and
+ * the unique (entry_id, version) stops two publishes of one entry), then the
+ * update, locked on version AND draft_at. If the update finds nothing, delete
+ * that history row again: it was never live.
+ */
 export interface PublishPlan {
   readonly updates: readonly PublishUpdate[]
   readonly versions: readonly BrainVersionRow[]
@@ -364,7 +400,7 @@ export function planPublish(
       refused.push({ id, error: 'not in the registry' })
       continue
     }
-    const check = entry.validate(draft)
+    const check = safeValidate(entry, draft)
     if (!check.ok) {
       refused.push({ id, error: check.error })
       continue
@@ -374,6 +410,7 @@ export function planPublish(
     updates.push({
       rowId: row.id,
       expectVersion: row.version,
+      expectDraftAt: row.draft_at ?? null,
       set: {
         value,
         version,

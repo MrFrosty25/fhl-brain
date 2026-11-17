@@ -268,6 +268,14 @@ const PARA = textValidator(2000)
 /** The three rungs of the owner's roofline rate rule, in order. */
 export const ROOFLINE_RUNGS = ['low', 'standard', 'high'] as const
 
+/**
+ * The season boundary is NOT decided (2026-11-16): the app uses July, August
+ * and September in three places. Until the owner picks, both season entries
+ * are unset and say so.
+ */
+export const SEASON_UNDECIDED =
+  'Not decided: three parts of the app use different season start months (July, August, September). The owner needs to pick one.'
+
 export const LESSON_FIELDS = ['title', 'what_happened', 'cost', 'rule'] as const
 
 export const REGISTRY: readonly RegistryEntry[] = [
@@ -341,7 +349,7 @@ export const REGISTRY: readonly RegistryEntry[] = [
     { key: 'cities', label: 'Example cities', help: 'Examples of where we work, never the limit.', audience: C, kind: 'list', validate: listValidator({ items: 'text', max: 200, itemMax: 80 }) },
   ]),
   ...section('season', [
-    { key: 'start_month', label: 'Season starts', help: 'The month (1–12) a new season begins for reports.', audience: S, kind: 'number', validate: intValidator(1, 12, 'Month') },
+    { key: 'start_month', label: 'Season starts', help: SEASON_UNDECIDED, audience: S, kind: 'number', validate: intValidator(1, 12, 'Month'), nullable: true },
     { key: 'removal_date', label: 'Removal starts', help: 'Month and day removal begins after the holidays (MM-DD).', audience: C, kind: 'text', validate: textValidator(5, MONTH_DAY) },
   ]),
   ...section('sales_process', [
@@ -359,9 +367,9 @@ export const REGISTRY: readonly RegistryEntry[] = [
     { key: 'material_per_foot', label: 'Material per foot', help: 'What a foot of lights costs us. Not recorded yet.', audience: S, kind: 'money_cents', validate: centsValidator(100_000), nullable: true },
   ]),
   ...section('definitions', [
-    { key: 'lead', label: 'A lead', help: 'What counts as a lead.', audience: S, kind: 'long_text', validate: PARA },
-    { key: 'close', label: 'A close', help: 'What counts as a won job.', audience: S, kind: 'long_text', validate: PARA },
-    { key: 'season', label: 'A season', help: 'Which dates belong to a season.', audience: S, kind: 'long_text', validate: PARA },
+    { key: 'lead', label: 'A lead', help: 'What counts as a real lead.', audience: S, kind: 'long_text', validate: PARA },
+    { key: 'close', label: 'A close', help: "What counts as a won job, built from the app's won stages.", audience: S, kind: 'long_text', validate: PARA },
+    { key: 'season', label: 'A season', help: SEASON_UNDECIDED, audience: S, kind: 'long_text', validate: PARA, nullable: true },
   ]),
   ...section('lessons', [
     {
